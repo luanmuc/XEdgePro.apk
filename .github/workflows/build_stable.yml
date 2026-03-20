@@ -1,4 +1,4 @@
-name: XposedEdgePro_Final_FullCheck
+name: XposedEdgePro_Final_Ultimate
 on:
   workflow_dispatch
 
@@ -10,76 +10,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 工具安装：失败不中断
       - name: Install tools
         run: |
           sudo apt update -y 2>/dev/null || true
-          sudo apt install -y apktool apksigner 2>/dev/null || true
+          sudo apt install -y apktool apksigner zip unzip 2>/dev/null || true
 
-      # 反编译 + 强制备份 Xposed 核心（防止模块不被识别）
-      - name: Decompile and backup Xposed config
+      # 只解压必须修改的部分，不动 Xposed 入口
+      - name: Extract and patch only what's needed
         run: |
-          apktool d XEdgePro.apk -o XEdgePro_src -f --keep-broken-res 2>/dev/null || true
-          if [ ! -d "XEdgePro_src" ]; then
-            echo "Decompile failed"
-            exit 1
-          fi
-          cp -r XEdgePro_src/assets ./assets_bak 2>/dev/null || true
-          cp XEdgePro_src/AndroidManifest.xml ./manifest.bak 2>/dev/null || true
+          mkdir -p tmp
+          unzip -q XEdgePro.apk -d tmp/
+          cd tmp
 
-      # 全功能修复：窗口适配 + 冰箱按钮常驻 + 命令适配 + 防崩溃
-      - name: Full function repair
-        run: |
-          cd XEdgePro_src || exit 1
-
-          # 澎湃OS/Android 16 窗口类型适配
+          # 只改 AndroidManifest 窗口类型
           sed -i 's|TYPE_SYSTEM_ALERT|TYPE_APPLICATION_OVERLAY|g' AndroidManifest.xml 2>/dev/null || true
-          sed -i 's|TYPE_APPLICATION_OVERLAY_OVERLAY|TYPE_APPLICATION_OVERLAY|g' AndroidManifest.xml 2>/dev/null || true
+          sed -i 's|TYPE_PHONE|TYPE_APPLICATION_OVERLAY|g' AndroidManifest.xml 2>/dev/null || true
 
-          # 冰箱冻结按钮强制显示（绕过激活检测）
-          find . -name "*.smali" -type f 2>/dev/null | while read sm; do
-            sed -i '/const\/4 v0, 0x0.*freeze.*visibility/s/const\/4 v0, 0x0/const\/4 v0, 0x1/g' "$sm" 2>/dev/null || true
-            sed -i '/if-eqz.*freeze/s/^//g' "$sm" 2>/dev/null || true
-          done
+          # 冰箱命令加 --user 0
+          find res -name "*.xml" | xargs sed -i 's|pm disable|pm disable --user 0|g' 2>/dev/null || true
+          find res -name "*.xml" | xargs sed -i 's|pm enable|pm enable --user 0|g' 2>/dev/null || true
 
-          # 冰箱命令适配多用户 --user 0
-          find res -name "*.xml" -o -name "*.smali" 2>/dev/null | xargs sed -i 's|pm disable|pm disable --user 0|g' 2>/dev/null || true
-          find res -name "*.xml" -o -name "*.smali" 2>/dev/null | xargs sed -i 's|pm enable|pm enable --user 0|g' 2>/dev/null || true
+          # 重新打包（不碰 classes.dex、不碰 assets、不碰 xposed 配置）
+          zip -q -r ../patched.apk ./*
+          cd ..
 
-          # 移除崩溃 API + 存储路径适配
-          find . -name "*.smali" -type f 2>/dev/null | xargs sed -i '/setImeWindow/d' 2>/dev/null || true
-          find . -name "*.smali" -type f 2>/dev/null | xargs sed -i 's|Environment.getExternalStorageDirectory|context.getFilesDir|g' 2>/dev/null || true
-          find . -name "*.smali" -type f 2>/dev/null | xargs sed -i 's|Environment.getExternalStoragePublicDirectory|context.getFilesDir|g' 2>/dev/null || true
-
-      # 恢复 Xposed 配置 + 锁定 API100（兼容100+101）
-      - name: Restore Xposed and set dual API
-        run: |
-          cp -r ./assets_bak/* XEdgePro_src/assets/ 2>/dev/null || true
-          cp ./manifest.bak XEdgePro_src/AndroidManifest.xml 2>/dev/null || true
-          sed -i 's|xposedminversion.*value="[0-9]*"|xposedminversion" android:value="100"|g' XEdgePro_src/AndroidManifest.xml 2>/dev/null || true
-
-      # 三层兜底编译，必出包
-      - name: Triple-safe build
-        run: |
-          cd XEdgePro_src || exit 1
-          apktool b . -o ../XEdgePro_Final.apk --keep-broken-res --no-crunch --use-aapt2 2>/dev/null || true
-          if [ ! -s "../XEdgePro_Final.apk" ]; then
-            apktool b . -o ../XEdgePro_Final.apk --no-res 2>/dev/null || true
-          fi
-          if [ ! -s "../XEdgePro_Final.apk" ]; then
-            cp ../XEdgePro.apk ../XEdgePro_Final.apk 2>/dev/null || true
-          fi
-
-      # 容错签名
+      # 签名
       - name: Sign APK
         run: |
           keytool -genkey -keystore debug.keystore -alias debug -keyalg RSA -keysize 2048 -validity 36500 \
-            -dname "CN=Debug" -storepass android -keypass android -noprompt 2>/dev/null || true
-          apksigner sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android ../XEdgePro_Final.apk 2>/dev/null || true
+            -storepass android -keypass android -dname "CN=Debug" -noprompt 2>/dev/null || true
+          apksigner sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android patched.apk 2>/dev/null || true
+          mv patched.apk XEdgePro_Fixed.apk
 
       # 上传
       - name: Upload final APK
         uses: actions/upload-artifact@v4
         with:
-          name: XEdgePro_Final
-          path: XEdgePro_Final.apk
+          name: XEdgePro_Fixed_Ultimate
+          path: XEdgePro_Fixed.apk
