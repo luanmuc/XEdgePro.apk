@@ -1,0 +1,73 @@
+name: Fix Xposed Edge Pro HyperOS3 Stable
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt update
+          sudo apt install -y apktool apksigner xmlstarlet
+
+      - name: Decompile APK
+        run: apktool d XEdgePro.apk -o XEdgePro_src -f --keep-broken-res --no-res
+
+      - name: Fix AndroidManifest.xml
+        run: |
+          cd XEdgePro_src
+          # Update SDK version
+          xmlstarlet ed -L -u '//uses-sdk/@android:minSdkVersion' -v '23' AndroidManifest.xml 2>/dev/null || true
+          xmlstarlet ed -L -u '//uses-sdk/@android:targetSdkVersion' -v '34' AndroidManifest.xml 2>/dev/null || true
+          # Replace overlay type
+          sed -i 's|TYPE_SYSTEM_ALERT|TYPE_APPLICATION_OVERLAY|g' AndroidManifest.xml
+          sed -i 's|TYPE_PHONE|TYPE_APPLICATION_OVERLAY|g' AndroidManifest.xml
+          # Add essential permissions
+          if ! xmlstarlet sel -q -t -c "//uses-permission[@android:name='android.permission.SYSTEM_ALERT_WINDOW']" AndroidManifest.xml; then
+            xmlstarlet ed -L -s '//manifest' -t elem -n 'uses-permission' -v '' AndroidManifest.xml
+            xmlstarlet ed -L -i '//manifest/uses-permission[last()]' -t attr -n 'android:name' -v "android.permission.SYSTEM_ALERT_WINDOW" AndroidManifest.xml
+          fi
+          if ! xmlstarlet sel -q -t -c "//uses-permission[@android:name='android.permission.WAKE_LOCK']" AndroidManifest.xml; then
+            xmlstarlet ed -L -s '//manifest' -t elem -n 'uses-permission' -v '' AndroidManifest.xml
+            xmlstarlet ed -L -i '//manifest/uses-permission[last()]' -t attr -n 'android:name' -v "android.permission.WAKE_LOCK" AndroidManifest.xml
+          fi
+          # Allow non-SDK API
+          if ! xmlstarlet sel -q -t -c "//application/@android:usesNonSdkApi" AndroidManifest.xml; then
+            xmlstarlet ed -L -i '//application' -t attr -n 'android:usesNonSdkApi' -v 'true' AndroidManifest.xml
+          fi
+
+      - name: Fix fridge (multi-user support)
+        run: |
+          cd XEdgePro_src
+          if [ -d "res/values" ]; then
+            find res/values -name "strings.xml" -exec sed -i 's/pm disable/pm disable --user 0/g' {} \;
+            find res/values -name "strings.xml" -exec sed -i 's/pm enable/pm enable --user 0/g' {} \;
+          fi
+
+      - name: Fix smali code
+        run: |
+          cd XEdgePro_src
+          find . -name "smali*" -type d | while read smali_dir; do
+            find "$smali_dir" -name "*.smali" -exec sed -i '/setImeWindowStatus/d' {} \;
+            find "$smali_dir" -name "*.smali" -exec sed -i 's/Environment.getExternalStorageDirectory/context.getFilesDir/g' {} \;
+          done
+
+      - name: Recompile APK
+        run: apktool b XEdgePro_src -o XEdgePro_HyperOS3_Fixed.apk --no-crunch
+
+      - name: Sign APK
+        run: |
+          keytool -genkey -v -keystore debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Android Debug,O=Android,C=US" -noprompt
+          apksigner sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android XEdgePro_HyperOS3_Fixed.apk
+          apksigner verify -v XEdgePro_HyperOS3_Fixed.apk
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: XEdgePro_HyperOS3_Fixed
+          path: XEdgePro_HyperOS3_Fixed.apk
